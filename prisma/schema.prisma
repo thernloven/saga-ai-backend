@@ -1,0 +1,133 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  password    String
+  isVerified  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Add relation to stories
+  stories     Story[]
+
+  @@map("users")
+}
+
+model Response {
+  id          BigInt   @id @default(autoincrement())
+  response_id String   @unique @db.VarChar(255)
+  type        String   @db.VarChar(50) // 'script', 'image', etc.
+  created_at  DateTime @default(now())
+
+  @@map("responses")
+}
+
+model Story {
+  id          String   @id @default(cuid())
+  user_id     String
+  title       String?
+  story       String?   @db.Text
+  style       String   @db.VarChar(50)
+  speakers    String   @db.VarChar(20) // 'single' or 'dual'
+  voices      String   @db.Text // JSON array of voice names
+  tone        String   @db.VarChar(50)
+  duration    String   @db.VarChar(10)
+  images      Image[]
+  audioSegments AudioSegment[]
+  music       Music[]
+
+  // AI Response data
+  response_id String?  @unique @db.VarChar(255)
+  transcript  String?  @db.Text
+  subtitles   String?  @db.Text // JSON with word-level timestamps from ElevenLabs
+  
+  // Media URLs
+  image_url   String?  @db.VarChar(500)
+  audio_url   String?  @db.VarChar(500)
+  video_url   String?  @db.VarChar(500)
+  cloudflare_id String? @db.VarChar(255) // Added Cloudflare Stream ID
+  
+  // Status tracking
+  status      String   @default("pending") @db.VarChar(20)
+  error       String?  @db.Text
+  
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+  
+  // Relations
+  user        User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("stories")
+}
+
+model Image {
+  id                BigInt   @id @default(autoincrement())
+  story_id          String
+  scene_id          String   @db.VarChar(50)
+  shot_number       Int      // Which shot within the scene (1, 2, 3...)
+  duration          Float?   // Duration in seconds for this shot (5-10 seconds)
+  shot_text         String?  @db.Text // The dialogue text for this shot
+  image_prompt      String   @db.Text
+  openai_response_id String? @unique @db.VarChar(255)
+  image_url         String?  @db.VarChar(500)
+  status            String   @default("pending") @db.VarChar(20)
+  error             String?  @db.Text
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+  
+  // Relations
+  story             Story    @relation(fields: [story_id], references: [id], onDelete: Cascade)
+
+  // Updated indexes for shot-based processing
+  @@unique([story_id, scene_id, shot_number])
+  @@index([story_id, scene_id])
+  @@map("images")
+}
+
+model AudioSegment {
+  id              String   @id @default(cuid())
+  story_id        String
+  scene_id        String   @db.VarChar(50)  // NEW: Which scene this belongs to
+  scene_number    Int                       // NEW: Scene order for mixing (1, 2, 3...)
+  scene_duration  Decimal? @db.Decimal(8,3) // NEW: Actual audio duration from ffprobe
+  text_content    String   @db.Text         // JSON string of the scene inputs array
+  character_count Int?
+  audio_url       String?  @db.VarChar(500)
+  status          String   @default("pending") @db.VarChar(20) // pending, processing, completed, failed
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  // Relation to Story
+  story Story @relation(fields: [story_id], references: [id], onDelete: Cascade)
+
+  // NEW: Composite unique constraint for scene-based processing
+  @@unique([story_id, scene_id])
+  @@index([story_id, scene_number])
+  @@map("audio_segments")
+}
+
+model Music {
+  id         String   @id @default(cuid())
+  story_id   String
+  music_id   String   @unique // ElevenLabs music ID
+  prompt     String
+  duration_ms Int
+  status     String   // 'processing', 'completed', 'failed'
+  audio_url  String?  // URL to the generated music file
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  story      Story    @relation(fields: [story_id], references: [id], onDelete: Cascade)
+
+  @@map("music")
+}
