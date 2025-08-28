@@ -201,14 +201,34 @@ export class SpeechService {
     try {
       // Calculate number of shots needed (one every 5 seconds, minimum 1)
       const shotsNeeded = Math.max(1, Math.ceil(actualDuration / 5));
-      
+
       logger.info(`Scene ${scene.id}: ${actualDuration}s duration requires ${shotsNeeded} image shots`);
+
+      // Calculate shot durations array (all 5s except possibly last shot)
+      const shotDurations: number[] = [];
+      let remaining = actualDuration;
+      for (let i = 0; i < shotsNeeded; i++) {
+        // For all but last, use 5s
+        if (i < shotsNeeded - 1) {
+          shotDurations.push(5);
+          remaining -= 5;
+        } else {
+          // Last shot gets the remainder (minimum 1s)
+          shotDurations.push(Math.max(1, Math.round(remaining)));
+        }
+      }
 
       // Generate dialogue-aware shot prompts using OpenAI
       const shotPrompts = await this.generateShotPrompts(
-        scene.image_prompt, 
-        scene.inputs, 
-        shotsNeeded
+        scene.image_prompt,
+        scene.inputs,
+        shotsNeeded,
+        {
+          setting: scene.setting,
+          characters: scene.characters
+        },
+        shotDurations,
+        actualDuration
       );
 
       // Pass the generated prompts to ImageService
@@ -221,10 +241,16 @@ export class SpeechService {
   }
 
   private async generateShotPrompts(
-    sceneDescription: string, 
-    sceneDialogue: any[], 
-    shotsNeeded: number
-  ): Promise<{shot: number, duration: number, prompt: string}[]> {
+    sceneDescription: string,
+    sceneDialogue: any[],
+    shotsNeeded: number,
+    context?: {
+      setting?: { name?: string; uuid?: string; description?: string };
+      characters?: Array<{ name?: string; uuid?: string; description?: string; appearances?: number }>;
+    },
+    targetDurations?: number[],
+    sceneDuration?: number
+  ): Promise<{ shot: number; duration: number; prompt: string }[]> {
     try {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
@@ -233,8 +259,27 @@ export class SpeechService {
 
       logger.info(`Generating ${shotsNeeded} dialogue-aware shot prompts for scene`);
 
+      // Build scene context (setting, characters, temporal anchor) to lock era and place
+      const settingName = context?.setting?.name?.trim();
+      const settingDesc = context?.setting?.description?.trim();
+      const characterNames = Array.isArray(context?.characters)
+        ? (context!.characters || []).map((c: any) => c?.name).filter(Boolean)
+        : [];
+
+      // Try to derive a temporal anchor from dialogue (e.g., "March 15, 44 BCE")
+      const allDialogueText = sceneDialogue.map((d: any) => d?.text || "").join(" \n ");
+      const dateWithEraMatch = allDialogueText.match(/\b([A-Z][a-z]+\s+\d{1,2},\s*\d{1,4}\s*(BCE|BC|CE|AD))\b/i);
+      const bareEraMatch = allDialogueText.match(/\b(\d{1,4})\s*(BCE|BC|CE|AD)\b/i);
+      const temporalAnchor = (dateWithEraMatch && dateWithEraMatch[1]) || (bareEraMatch && bareEraMatch[0]) || null;
+
+      const contextPreamble = [
+        `Setting: ${settingName || 'Unknown'}` + (settingDesc ? ` — ${settingDesc}` : ''),
+        `Characters in scene: ${characterNames.length ? characterNames.join(', ') : '—'}`,
+        `Era/Date: ${temporalAnchor || '—'}`
+      ].join('\n');
+
       // Build dialogue context for the AI
-      const dialogueContext = sceneDialogue.map((input, index) => 
+      const dialogueContext = sceneDialogue.map((input, index) =>
         `${index + 1}. "${input.text}" (${input.text.length} characters)`
       ).join('\n');
 
@@ -242,28 +287,18 @@ export class SpeechService {
         'https://api.openai.com/v1/responses',
         {
           model: "gpt-5-nano",
-          instructions: `Create ${shotsNeeded} cinematic shots for this scene. You have these dialogue segments:
-
-${dialogueContext}
-
-Use the scene description for visual style: ${sceneDescription}
-
-Distribute the ${shotsNeeded} shots across the dialogue, considering:
-- Important story beats get multiple angles
-- Longer dialogue gets more shots  
-- Include establishing/atmospheric shots for pacing
-- Each shot should visualize what's being said OR support the mood
-
-For each shot, determine the optimal duration - ONLY 5 or 10 seconds:
-- Wide establishing shots, drone shots, landscapes: 10 seconds
-- Medium shots, dialogue shots: 5 seconds  
-- Close-ups, detail shots, quick cuts: 5 seconds
-- Action shots, movement: 10 seconds
-
-Return shots that combine the scene style with specific dialogue content. Each shot prompt should be cinematic and specific to what's being narrated.
-
-Return as JSON with "shots" array containing objects with shot number, duration (5 or 10 seconds only), and prompt.`,
-          input: `Scene Style: ${sceneDescription}\n\nDialogue:\n${dialogueContext}`,
+          instructions:
+            `Scene total duration: ${sceneDuration} seconds.\n` +
+            `Shot durations (in order): [${targetDurations?.join(', ') || ''}]\n\n` +
+            `Create ${shotsNeeded} cinematic shots for this scene using the dialogue and context below. STRICTLY follow these rules:\n\n` +
+            `- Era & Place Lock: All shots must be faithful to the historical context indicated by the setting and date. Do NOT include modern clothing, props, architecture, tech, or lighting. Favor materials like marble, travertine, bronze, oil lamps, togas, etc., when Roman context is implied.\n` +
+            `- Dialogue Alignment: Each shot must visualize or support a specific dialogue beat. In the prompt, reference the dialogue line number using (line X).\n` +
+            `- Visual Variety: Important beats may get multiple angles; include establishing or atmospheric shots for pacing when helpful.\n` +
+            `- Durations: Each shot’s duration must exactly match the provided array, in order. (Shot 1 = first value, Shot 2 = second value, etc.)\n` +
+            `- Style: Respect the scene style and mood.\n` +
+            `- Prompt Prefix: Begin each shot prompt with a short tag of the form [Setting: <name> | Era: <value>] using the provided context (if era/date is unknown, infer plausibly from setting).\n\n` +
+            `Return shots that combine the scene style with the specific dialogue content and adhere to historical plausibility. Return as JSON with a "shots" array of objects { shot, duration, prompt }.`,
+          input: `Scene Style: ${sceneDescription}\n\nContext:\n${contextPreamble}\n\nDialogue (numbered):\n${dialogueContext}`,
           text: {
             format: {
               type: "json_schema",
@@ -277,7 +312,7 @@ Return as JSON with "shots" array containing objects with shot number, duration 
                       type: "object",
                       properties: {
                         shot: { type: "number" },
-                        duration: { type: "number", enum: [5, 10] },
+                        duration: { type: "number" },
                         prompt: { type: "string" }
                       },
                       required: ["shot", "duration", "prompt"],

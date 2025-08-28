@@ -182,7 +182,7 @@ export class StoryCompletionService {
       await prisma.story.update({
         where: { id: storyId },
         data: { 
-          status: 'pending_final'
+          status: 'audio_completed'
         }
       });
 

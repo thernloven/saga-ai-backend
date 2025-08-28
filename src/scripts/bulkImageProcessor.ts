@@ -5,7 +5,7 @@ import logger from "../utils/logger.js";
 const responseService = new ResponseService();
 
 // 🎯 CHANGE THIS STORY ID TO PROCESS DIFFERENT STORIES
-const STORY_ID = "cmer594ld0001qgxrdix954c3";
+const STORY_ID = "cmevvo3to000114x6st8wkwql";
 
 async function processImagesForStory() {
   try {

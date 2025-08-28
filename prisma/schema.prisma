@@ -55,6 +55,7 @@ model Story {
   audio_url   String?  @db.VarChar(500)
   video_url   String?  @db.VarChar(500)
   cloudflare_id String? @db.VarChar(255) // Added Cloudflare Stream ID
+  anchors     Anchor[]  // Add this relation
   
   // Status tracking
   status      String   @default("pending") @db.VarChar(20)
@@ -130,4 +131,27 @@ model Music {
   story      Story    @relation(fields: [story_id], references: [id], onDelete: Cascade)
 
   @@map("music")
+}
+
+model Anchor {
+  id              String   @id @default(cuid())
+  story_id        String
+  anchor_uuid     String   // The UUID from script generation
+  type            String   @db.VarChar(20) // 'character' or 'setting'
+  name            String   @db.VarChar(255)
+  description     String   @db.Text
+  appearances     Int      // How many scenes this appears in
+  openai_response_id String? @db.VarChar(255) // Set after image generation
+  image_url       String?  @db.VarChar(500) // Set after image completes
+  status          String   @default("pending") @db.VarChar(20) // pending, processing, completed, failed
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+  
+  // Relations
+  story           Story    @relation(fields: [story_id], references: [id], onDelete: Cascade)
+  
+  // Indexes
+  @@unique([story_id, anchor_uuid])
+  @@index([story_id, type])
+  @@map("anchors")
 }

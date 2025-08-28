@@ -65,6 +65,8 @@ export class ResponseService {
         await this.handleScriptCompletion(responseId, responseData);
       } else if (response.type === 'image') {
         await this.handleImageCompletion(responseId, responseData);
+      } else if (response.type === 'anchor') {
+        await this.handleAnchorCompletion(responseId, responseData);
       }
 
     } catch (error) {
@@ -122,52 +124,213 @@ private async handleScriptCompletion(responseId: string, responseData: OpenAIRes
 
     const scriptData = JSON.parse(textContent.text);
 
-    // ✅ Update the story with script data, but don't mark as fully completed yet
+    // Update the story with script data
     await prisma.story.update({
       where: { id: story.id },
       data: {
         title: scriptData.title,
-        transcript: JSON.stringify(scriptData), // Store full script as JSON
-        status: 'script_completed' // ✅ Changed from 'completed'
+        transcript: JSON.stringify(scriptData),
+        status: 'script_completed'
       }
     });
 
     logger.info(`Story script completed: ${story.id}`);
 
-    // Fire-and-forget: kick off audio generation
-    speechService
-      .generateAudioForStory(story.id, scriptData)
-      .then(async () => {
-        logger.info(`Audio generation finished for story ${story.id}`);
-        
-        // ✅ Update status to audio_completed when audio generation finishes
-        await prisma.story.update({
-          where: { id: story.id },
-          data: { status: 'audio_completed' }
-        });
-        
-        // ✅ Check story completion now that audio is ready
-        await storyCompletionService.checkStoryCompletion(story.id);
-      })
-      .catch((err) => logger.error(`Audio generation failed for story ${story.id}: ${err}`));
+    // Store all anchors in database
+    await this.storeAnchors(story.id, scriptData);
 
-    // Fire-and-forget: kick off music generation using story data
+    // Fire off anchor image generation for entities appearing 2+ times
+    imageService
+      .generateAnchorImages(story.id, scriptData.metadata.imageStyle)
+      .catch((err) => logger.error(`Anchor image generation failed for story ${story.id}: ${err}`));
+
+    // Fire-and-forget: kick off music generation
     const duration = typeof story.duration === 'string' ? parseInt(story.duration, 10) : story.duration;
     const musicPrompt = this.buildMusicPrompt(story.style, story.tone);
     musicService
       .generateMusic(story.id, musicPrompt, duration)
       .then(async (musicId) => {
         logger.info(`Music generation initiated for story ${story.id}: ${musicId}`);
-        // ✅ Check if story is now complete (this will check audio + images + music)
         await storyCompletionService.checkStoryCompletion(story.id);
       })
       .catch((err) => logger.error(`Music generation failed for story ${story.id}: ${err}`));
 
-    return;
+    // ✅ NEW safeguard: if no anchors are needed, start audio immediately
+    const neededAnchors = await prisma.anchor.count({
+      where: {
+        story_id: story.id,
+        appearances: { gte: 2 }
+      }
+    });
+
+    if (neededAnchors === 0) {
+      logger.info(`No anchor images needed for story ${story.id}. Starting audio generation now.`);
+
+      speechService
+        .generateAudioForStory(story.id, scriptData)
+        .then(async () => {
+          logger.info(`Audio generation finished for story ${story.id}`);
+          
+          // Update status to audio_completed when audio generation finishes
+          await prisma.story.update({
+            where: { id: story.id },
+            data: { status: 'audio_completed' }
+          });
+          
+          // Check story completion now that audio is ready
+          await storyCompletionService.checkStoryCompletion(story.id);
+        })
+        .catch((err) => logger.error(`Audio generation failed for story ${story.id}: ${err}`));
+    } else {
+      logger.info(`Story ${story.id} requires ${neededAnchors} anchor images. Waiting for completion before audio.`);
+    }
 
   } catch (error) {
     logger.error(`Error handling script completion: ${error}`);
     throw error;
+  }
+}
+
+private async storeAnchors(storyId: string, scriptData: any): Promise<void> {
+  // Store character anchors
+  for (const character of scriptData.metadata.anchors.characters) {
+    await prisma.anchor.create({
+      data: {
+        story_id: storyId,
+        anchor_uuid: character.uuid,
+        type: 'character',
+        name: character.name,
+        description: character.description,
+        appearances: character.appearances,
+        status: character.appearances >= 2 ? 'pending' : 'not_needed'
+      }
+    });
+  }
+
+  // Store setting anchors
+  for (const setting of scriptData.metadata.anchors.settings) {
+    await prisma.anchor.create({
+      data: {
+        story_id: storyId,
+        anchor_uuid: setting.uuid,
+        type: 'setting',
+        name: setting.name,
+        description: setting.description,
+        appearances: setting.appearances,
+        status: setting.appearances >= 2 ? 'pending' : 'not_needed'
+      }
+    });
+  }
+
+  logger.info(`Stored ${scriptData.metadata.anchors.characters.length} characters and ${scriptData.metadata.anchors.settings.length} settings for story ${storyId}`);
+}
+
+private async handleAnchorCompletion(responseId: string, responseData: OpenAIResponseData): Promise<void> {
+  try {
+    // Find the anchor with this response_id
+    const anchor = await prisma.anchor.findFirst({
+      where: { openai_response_id: responseId }
+    });
+
+    if (!anchor) {
+      logger.warn(`Anchor not found for response: ${responseId}`);
+      return;
+    }
+
+    logger.info(`Anchor image completed for: ${anchor.name} (${anchor.anchor_uuid})`);
+
+    // Simply mark anchor as completed - no need to download/upload the image
+    await prisma.anchor.update({
+      where: { id: anchor.id },
+      data: {
+        status: 'completed',
+        openai_response_id: responseId
+      }
+    });
+
+    // Check if all anchor images are complete, then trigger audio generation
+    await this.checkAndTriggerAudioGeneration(anchor.story_id);
+
+  } catch (error) {
+    logger.error(`Error handling anchor completion: ${error}`);
+    
+    // Mark anchor as failed
+    const anchor = await prisma.anchor.findFirst({
+      where: { openai_response_id: responseId }
+    });
+    
+    if (anchor) {
+      await prisma.anchor.update({
+        where: { id: anchor.id },
+        data: { status: 'failed' }
+      });
+    }
+    
+    throw error;
+  }
+}
+
+private async checkAndTriggerAudioGeneration(storyId: string): Promise<void> {
+  try {
+    // Check if all required anchors are complete
+    const requiredAnchors = await prisma.anchor.count({
+      where: { story_id: storyId, appearances: { gte: 2 } }
+    });
+
+    const completedAnchors = await prisma.anchor.count({
+      where: { story_id: storyId, appearances: { gte: 2 }, status: 'completed' }
+    });
+
+    if (completedAnchors < requiredAnchors) {
+      logger.info(`Story ${storyId} still waiting for ${requiredAnchors - completedAnchors} anchor images`);
+      return;
+    }
+
+    // All anchors are complete, check if audio hasn't started yet
+    const story = await prisma.story.findUnique({
+      where: { id: storyId },
+      select: { status: true, transcript: true }
+    });
+
+    if (!story) {
+      logger.warn(`Story not found: ${storyId}`);
+      return;
+    }
+
+    if (story.status !== 'script_completed') {
+      logger.info(`Story ${storyId} status is ${story.status}, waiting for script completion and anchor images`);
+      return;
+    }
+
+    if (!story.transcript) {
+      logger.warn(`Story ${storyId} has no transcript data`);
+      return;
+    }
+
+    // Parse script data
+    const scriptData = JSON.parse(story.transcript);
+
+    logger.info(`All anchor images completed for story ${storyId}. Starting audio generation.`);
+
+    // Fire-and-forget: kick off audio generation
+    speechService
+      .generateAudioForStory(storyId, scriptData)
+      .then(async () => {
+        logger.info(`Audio generation finished for story ${storyId}`);
+        
+        // Update status to audio_completed when audio generation finishes
+        await prisma.story.update({
+          where: { id: storyId },
+          data: { status: 'audio_completed' }
+        });
+        
+        // Check story completion now that audio is ready
+        await storyCompletionService.checkStoryCompletion(storyId);
+      })
+      .catch((err) => logger.error(`Audio generation failed for story ${storyId}: ${err}`));
+
+  } catch (error) {
+    logger.error(`Error checking and triggering audio generation for story ${storyId}: ${error}`);
   }
 }
 
@@ -236,5 +399,4 @@ async handleCloudflareVideoReady(webhookData: any): Promise<void> {
     throw error;
   }
 }
-
 }
