@@ -7,6 +7,10 @@ export class StoryCompletionService {
   // Accept story as complete if at least 90% of images are successful
   private static readonly MIN_IMAGE_SUCCESS_RATE = 0.90;
 
+  // Image pipeline statuses
+  private static readonly NON_TERMINAL_STATUSES = ['queued', 'pending', 'generating'];
+  private static readonly TERMINAL_FAILED_STATUSES = ['failed', 'terminal_failed']; // adjust if you only use 'failed'
+
   /**
    * Check if all components of a story are completed and update status accordingly
    * Should be called whenever audio, images, or music completes
@@ -46,10 +50,14 @@ export class StoryCompletionService {
         return;
       }
 
-      // Check 2: Images mostly completed? (require ≥90% success rate)
+      // Check 2: Images completion (must all be attempted, then pass success threshold)
       const imagesResult = await this.checkImagesCompletion(storyId);
+      if (!imagesResult.allAttempted) {
+        logger.info(`Story ${storyId}: Images not ready — still in progress: ${imagesResult.nonTerminal} (completed ${imagesResult.completed}/${imagesResult.total})`);
+        return;
+      }
       if (!imagesResult.acceptable) {
-        logger.info(`Story ${storyId}: Images not ready (${imagesResult.successRate.toFixed(1)}% success rate, min required: ${(StoryCompletionService.MIN_IMAGE_SUCCESS_RATE * 100).toFixed(0)}%)`);
+        logger.info(`Story ${storyId}: Images below threshold (${(imagesResult.successRate * 100).toFixed(1)}% < ${(StoryCompletionService.MIN_IMAGE_SUCCESS_RATE * 100).toFixed(0)}%)`);
         return;
       }
 
@@ -95,52 +103,60 @@ export class StoryCompletionService {
   }
 
   /**
-   * Check if images are sufficiently completed for the story
-   * Accepts story if at least MIN_IMAGE_SUCCESS_RATE (90%) of images are completed
+   * Check if images are sufficiently completed for the story.
+   * New rule: require ALL images to reach a terminal state (completed or failed) BEFORE
+   * applying the success-rate threshold (MIN_IMAGE_SUCCESS_RATE).
    */
   private async checkImagesCompletion(storyId: string): Promise<{
-    acceptable: boolean;
-    total: number;
-    completed: number;
-    failed: number;
-    missing: number;
-    successRate: number;
+    acceptable: boolean;      // ready to proceed (allAttempted && successRate >= min)
+    total: number;            // total images in DB for this story
+    completed: number;        // status === 'completed'
+    failed: number;           // status in TERMINAL_FAILED_STATUSES
+    missing: number;          // images not completed (legacy metric kept for compatibility)
+    nonTerminal: number;      // status in NON_TERMINAL_STATUSES
+    allAttempted: boolean;    // nonTerminal === 0
+    successRate: number;      // completed / total
   }> {
     try {
-      const images = await prisma.image.findMany({
-        where: { story_id: storyId },
-        select: { status: true }
-      });
+      const [total, completed, failed, nonTerminal] = await Promise.all([
+        prisma.image.count({ where: { story_id: storyId } }),
+        prisma.image.count({ where: { story_id: storyId, status: 'completed' } }),
+        prisma.image.count({ where: { story_id: storyId, status: { in: StoryCompletionService.TERMINAL_FAILED_STATUSES } } }),
+        prisma.image.count({ where: { story_id: storyId, status: { in: StoryCompletionService.NON_TERMINAL_STATUSES } } }),
+      ]);
 
-      // If no images exist, consider it incomplete
-      if (images.length === 0) {
+      if (total === 0) {
         return {
           acceptable: false,
           total: 0,
           completed: 0,
           failed: 0,
           missing: 0,
+          nonTerminal: 0,
+          allAttempted: false,
           successRate: 0
         };
       }
 
-      const completed = images.filter((image: any) => image.status === 'completed').length;
-      const failed = images.filter((image: any) => image.status === 'failed').length;
-      const total = images.length;
-      const missing = total - completed;
       const successRate = completed / total;
+      const allAttempted = nonTerminal === 0; // nothing still in progress
+      const acceptable = allAttempted && successRate >= StoryCompletionService.MIN_IMAGE_SUCCESS_RATE;
 
-      // Consider acceptable if success rate meets minimum threshold
-      const acceptable = successRate >= StoryCompletionService.MIN_IMAGE_SUCCESS_RATE;
-      
-      logger.info(`Story ${storyId}: ${completed}/${total} images completed (${failed} failed, ${missing} missing, ${(successRate * 100).toFixed(1)}% success rate) - Acceptable: ${acceptable}`);
-      
+      const missing = total - completed; // legacy metric: everything not completed (includes failed + in-progress)
+
+      logger.info(
+        `Story ${storyId}: images — total=${total}, completed=${completed}, failed=${failed}, inProgress=${nonTerminal}, ` +
+        `successRate=${(successRate * 100).toFixed(1)}%, allAttempted=${allAttempted}, acceptable=${acceptable}`
+      );
+
       return {
         acceptable,
         total,
         completed,
         failed,
         missing,
+        nonTerminal,
+        allAttempted,
         successRate
       };
     } catch (error) {
@@ -151,6 +167,8 @@ export class StoryCompletionService {
         completed: 0,
         failed: 0,
         missing: 0,
+        nonTerminal: 0,
+        allAttempted: false,
         successRate: 0
       };
     }
@@ -241,7 +259,12 @@ export class StoryCompletionService {
         completed: images.completed,
         total: images.total,
         missing: images.missing,
-        successRate: images.successRate
+        successRate: images.successRate,
+        // expose new diagnostics
+        // @ts-ignore — widening return for richer UI/monitoring
+        nonTerminal: (images as any).nonTerminal,
+        // @ts-ignore
+        allAttempted: (images as any).allAttempted,
       }, 
       music, 
       overall 
