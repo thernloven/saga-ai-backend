@@ -12,6 +12,18 @@ const storyController = new StoryController();
 const responseController = new ResponseController();
 const subtitleController = new SubtitleController();
 
+router.post('/auth/validate', authenticate, (req, res) => {
+  // If we reach here, the token is valid (authenticate middleware passed)
+  res.status(200).json({
+    success: true,
+    message: 'Token is valid',
+    user: {
+      id: req.user!.id,
+      email: req.user!.email,
+    }
+  });
+});
+
 // Public auth routes
 router.post("/auth/register", authController.register.bind(authController));
 router.post("/auth/verify-otp", authController.verifyOtp.bind(authController));
