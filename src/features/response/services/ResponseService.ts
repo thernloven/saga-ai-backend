@@ -335,25 +335,34 @@ private async checkAndTriggerAudioGeneration(storyId: string): Promise<void> {
 }
 
 private async handleImageCompletion(responseId: string, responseData: OpenAIResponseData): Promise<void> {
-    try {
-      // Delegate all image processing to ImageService
-      await imageService.handleImageCompletion(responseId, responseData);
-      
-      // Get the story ID from the completed image to check story completion
-      const image = await prisma.image.findUnique({
-        where: { openai_response_id: responseId },
-        select: { story_id: true }
-      });
-      
-      if (image?.story_id) {
-        // Check if story is now complete (all images + audio + music)
-        await storyCompletionService.checkStoryCompletion(image.story_id);
+  let storyId: string | null = null;
+
+  try {
+    // Resolve storyId up-front so we can trigger completion even if processing fails
+    const img = await prisma.image.findUnique({
+      where: { openai_response_id: responseId },
+      select: { story_id: true }
+    });
+    storyId = img?.story_id ?? null;
+
+    // Delegate all image processing to ImageService (on error it marks the row failed)
+    await imageService.handleImageCompletion(responseId, responseData);
+  } catch (error) {
+    logger.error(`Error handling image completion: ${error}`);
+    throw error;
+  } finally {
+    // ALWAYS re-check story completion if we know which story this response belongs to
+    if (storyId) {
+      try {
+        await storyCompletionService.checkStoryCompletion(storyId);
+      } catch (e) {
+        logger.error(`Completion recheck failed for story ${storyId}: ${e}`);
       }
-    } catch (error) {
-      logger.error(`Error handling image completion: ${error}`);
-      throw error;
+    } else {
+      logger.warn(`No storyId found for response ${responseId}; skipping completion check`);
     }
   }
+}
 
 // In ResponseService class
 async handleCloudflareVideoReady(webhookData: any): Promise<void> {
