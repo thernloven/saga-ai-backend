@@ -81,7 +81,7 @@ export class SpeechService {
       logger.info(`Starting scene-by-scene audio generation for story: ${storyId}`);
       logger.info(`Total scenes to process: ${scriptData.scenes.length}`);
 
-      // Process all scenes concurrently (max 3 at a time)
+      // Process all scenes concurrently (capped by MAX_CONCURRENT_CALLS)
       await this.processScenesWithConcurrency(storyId, scriptData);
 
       logger.info(`Audio generation initiated for ${scriptData.scenes.length} scenes`);
@@ -187,8 +187,43 @@ export class SpeechService {
       // Check if all scenes are complete for final mixing
       await this.checkAndTriggerMixing(storyId);
     } catch (error) {
-      logger.error(`Error generating audio for scene ${scene.id}: ${error}`);
+      this.logAxiosError(`Error generating audio for scene ${scene.id}`, error);
       throw error;
+    }
+  }
+
+  private logAxiosError(context: string, error: any, extra?: Record<string, any>) {
+    try {
+      const err: any = error;
+      const status = err?.response?.status;
+      const statusText = err?.response?.statusText;
+      const headers = err?.response?.headers || {};
+      let data = err?.response?.data;
+
+      // Decode ArrayBuffer/Buffer bodies to UTF-8 so JSON from ElevenLabs is readable
+      try {
+        if (data && (data instanceof ArrayBuffer || Buffer.isBuffer(data))) {
+          data = Buffer.from(data as any).toString("utf8");
+        }
+        if (typeof data !== "string") {
+          data = JSON.stringify(data);
+        }
+      } catch {}
+
+      const requestId = headers["x-request-id"] || headers["request-id"] || headers["x-amzn-requestid"] || headers["x-amz-request-id"] || "N/A";
+      const info = {
+        status,
+        statusText,
+        requestId,
+        url: err?.config?.url,
+        method: err?.config?.method,
+        // Do NOT log credentials/headers; keep body visibility minimal but helpful
+      };
+
+      logger.error(`${context}: HTTP ${status ?? "N/A"} ${statusText ?? ""} reqId=${requestId}`);
+      logger.error(`${context} details: info=${JSON.stringify(info)} body=${data ?? "N/A"}`);
+    } catch (fallback) {
+      logger.error(`${context}: ${error}`);
     }
   }
 
