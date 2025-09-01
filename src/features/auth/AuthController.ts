@@ -89,4 +89,45 @@ export class AuthController {
       res.status(400).json({ error: (error as Error).message });
     }
   }
+
+  // Add this method to your AuthController class
+async logout(req: Request, res: Response): Promise<void> {
+  logger.info('🚪 Logout Started', {
+    headers: {
+      'user-agent': req.headers['user-agent'],
+      'authorization': req.headers['authorization'] ? 'Bearer ***' : 'none'
+    },
+    ip: req.ip
+  });
+
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+
+  if (!token) {
+    logger.warn('⚠️ Logout attempted without token');
+    res.status(400).json({ error: "No token provided" });
+    return;
+  }
+
+  try {
+    logger.info('🔐 Processing logout');
+    const result = await authService.logout(token);
+
+    if (!result.success) {
+      logger.warn('⚠️ Logout failed', { reason: result.message });
+      res.status(400).json({ error: result.message });
+      return;
+    }
+
+    logger.info('✅ Logout successful');
+    res.status(200).json({ message: "Logged out successfully" });
+
+  } catch (error: any) {
+    logger.error('💥 Logout exception', {
+      error: error.message,
+      stack: error.stack
+    });
+    res.status(500).json({ error: "Logout failed" });
+  }
+}
 }

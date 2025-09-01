@@ -24,6 +24,9 @@ router.post('/auth/validate', authenticate, (req, res) => {
   });
 });
 
+// Logout route
+router.post("/auth/logout", authController.logout.bind(authController));
+
 // Public auth routes
 router.post("/auth/register", authController.register.bind(authController));
 router.post("/auth/verify-otp", authController.verifyOtp.bind(authController));

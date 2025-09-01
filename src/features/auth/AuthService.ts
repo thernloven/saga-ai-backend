@@ -177,4 +177,29 @@ export class AuthService {
       throw error;
     }
   }
+
+async logout(token: string) {
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
+    
+    // Add token to blacklist with its expiration time
+    await prisma.tokenBlacklist.create({
+      data: {
+        token,
+        expiresAt: new Date(decoded.exp * 1000) // JWT exp is in seconds, convert to milliseconds
+      }
+    });
+    
+    return {
+      success: true,
+      message: "Logged out successfully"
+    };
+  } catch (error) {
+    logger.error(`Logout error: ${error}`);
+    return {
+      success: false,
+      message: "Invalid token"
+    };
+  }
+}
 }
