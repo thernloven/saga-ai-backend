@@ -41,6 +41,7 @@ model Story {
   voices      String   @db.Text // JSON array of voice names
   tone        String   @db.VarChar(50)
   duration    String   @db.VarChar(10)
+  video       Boolean  @default(true) // New field for video/audio-only mode
   images      Image[]
   audioSegments AudioSegment[]
   music       Music[]
@@ -164,4 +165,14 @@ model TokenBlacklist {
   createdAt DateTime @default(now())
   
   @@map("token_blacklist")
+}
+
+model Voice {
+  id        String   @id @default(cuid())
+  name      String   @db.VarChar(255)
+  voice_id  String   @unique @db.VarChar(255)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("voices")
 }

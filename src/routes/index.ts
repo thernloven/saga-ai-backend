@@ -38,6 +38,7 @@ router.get("/auth/profile", authenticate, authController.getProfile.bind(authCon
 
 //Story generation
 router.post("/story/generate", authenticate, storyController.generateStory.bind(storyController));
+router.get("/story/voices", authenticate, storyController.getVoices.bind(storyController));
 
 //Response
 router.post("/webhook/openai", responseController.handleWebhook.bind(responseController));

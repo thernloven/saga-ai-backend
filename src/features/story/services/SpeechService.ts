@@ -76,13 +76,13 @@ export class SpeechService {
     }
   }
 
-  async generateAudioForStory(storyId: string, scriptData: EnhancedScript): Promise<void> {
+  async generateAudioForStory(storyId: string, scriptData: EnhancedScript, audioOnly: boolean = false): Promise<void> {
     try {
-      logger.info(`Starting scene-by-scene audio generation for story: ${storyId}`);
+      logger.info(`Starting ${audioOnly ? 'audio-only' : 'scene-by-scene'} audio generation for story: ${storyId}`);
       logger.info(`Total scenes to process: ${scriptData.scenes.length}`);
 
       // Process all scenes concurrently (capped by MAX_CONCURRENT_CALLS)
-      await this.processScenesWithConcurrency(storyId, scriptData);
+      await this.processScenesWithConcurrency(storyId, scriptData, audioOnly);
 
       logger.info(`Audio generation initiated for ${scriptData.scenes.length} scenes`);
     } catch (error) {
@@ -91,7 +91,7 @@ export class SpeechService {
     }
   }
 
-  private async processScenesWithConcurrency(storyId: string, scriptData: EnhancedScript): Promise<void> {
+  private async processScenesWithConcurrency(storyId: string, scriptData: EnhancedScript, audioOnly: boolean = false): Promise<void> {
     let activeRequests = 0;
     const maxConcurrent = this.MAX_CONCURRENT_CALLS;
 
@@ -108,7 +108,8 @@ export class SpeechService {
           storyId,
           scene,
           sceneIndex + 1,
-          scriptData.metadata.imageStyle
+          audioOnly ? null : scriptData.metadata.imageStyle, // No imageStyle for audio-only
+          audioOnly
         );
       } catch (error) {
         logger.error(`Error processing scene ${scene.id}: ${error}`);
@@ -127,7 +128,8 @@ export class SpeechService {
     storyId: string,
     scene: any,
     sceneNumber: number,
-    imageStyle: string
+    imageStyle: string | null,
+    audioOnly: boolean = false
   ): Promise<void> {
     try {
       const apiKey = process.env.ELEVENLABS_API_KEY;
@@ -135,7 +137,7 @@ export class SpeechService {
         throw new Error("ElevenLabs API key not configured");
       }
 
-      logger.info(`Generating audio for scene: ${scene.id} (${scene.inputs.length} inputs)`);
+      logger.info(`Generating audio for scene: ${scene.id} (${scene.inputs.length} inputs) - ${audioOnly ? 'audio-only' : 'video'} mode`);
 
       // Create audio segment record
       await prisma.audioSegment.create({
@@ -181,11 +183,14 @@ export class SpeechService {
 
       logger.info(`Scene audio completed: ${scene.id}, actual duration: ${actualDuration}s`);
 
-      // NEW: Generate dynamic image shots based on actual duration
-      await this.generateDynamicImageShots(storyId, scene, actualDuration, imageStyle);
+      // Only generate images if not audio-only mode
+      if (!audioOnly && imageStyle) {
+        // Generate dynamic image shots based on actual duration
+        await this.generateDynamicImageShots(storyId, scene, actualDuration, imageStyle);
+      }
 
       // Check if all scenes are complete for final mixing
-      await this.checkAndTriggerMixing(storyId);
+      await this.checkAndTriggerMixing(storyId, audioOnly);
     } catch (error) {
       this.logAxiosError(`Error generating audio for scene ${scene.id}`, error);
       throw error;
@@ -234,19 +239,19 @@ export class SpeechService {
     imageStyle: string
   ): Promise<void> {
     try {
-      // Calculate number of shots needed (one every 5 seconds, minimum 1)
-      const shotsNeeded = Math.max(1, Math.ceil(actualDuration / 5));
+      // Calculate number of shots needed (one every 10 seconds, minimum 1)
+      const shotsNeeded = Math.max(1, Math.ceil(actualDuration / 10));
 
-      logger.info(`Scene ${scene.id}: ${actualDuration}s duration requires ${shotsNeeded} image shots`);
+      logger.info(`Scene ${scene.id}: ${actualDuration}s duration requires ${shotsNeeded} image shots (10s each)`);
 
-      // Calculate shot durations array (all 5s except possibly last shot)
+      // Calculate shot durations array (all 10s except possibly last shot)
       const shotDurations: number[] = [];
       let remaining = actualDuration;
       for (let i = 0; i < shotsNeeded; i++) {
-        // For all but last, use 5s
+        // For all but last, use 10s
         if (i < shotsNeeded - 1) {
-          shotDurations.push(5);
-          remaining -= 5;
+          shotDurations.push(10);
+          remaining -= 10;
         } else {
           // Last shot gets the remainder (minimum 1s)
           shotDurations.push(Math.max(1, Math.round(remaining)));
@@ -292,7 +297,7 @@ export class SpeechService {
         throw new Error('OpenAI API key not configured');
       }
 
-      logger.info(`Generating ${shotsNeeded} dialogue-aware shot prompts for scene`);
+      logger.info(`Generating ${shotsNeeded} individual cinematic shots for scene (10s duration each)`);
 
       // Build scene context (setting, characters, temporal anchor) to lock era and place
       const settingName = context?.setting?.name?.trim();
@@ -325,14 +330,30 @@ export class SpeechService {
           instructions:
             `Scene total duration: ${sceneDuration} seconds.\n` +
             `Shot durations (in order): [${targetDurations?.join(', ') || ''}]\n\n` +
-            `Create ${shotsNeeded} cinematic shots for this scene using the dialogue and context below. STRICTLY follow these rules:\n\n` +
-            `- Era & Place Lock: All shots must be faithful to the historical context indicated by the setting and date. Do NOT include modern clothing, props, architecture, tech, or lighting. Favor materials like marble, travertine, bronze, oil lamps, togas, etc., when Roman context is implied.\n` +
-            `- Dialogue Alignment: Each shot must visualize or support a specific dialogue beat. In the prompt, reference the dialogue line number using (line X).\n` +
-            `- Visual Variety: Important beats may get multiple angles; include establishing or atmospheric shots for pacing when helpful.\n` +
-            `- Durations: Each shot’s duration must exactly match the provided array, in order. (Shot 1 = first value, Shot 2 = second value, etc.)\n` +
-            `- Style: Respect the scene style and mood.\n` +
-            `- Prompt Prefix: Begin each shot prompt with a short tag of the form [Setting: <name> | Era: <value>] using the provided context (if era/date is unknown, infer plausibly from setting).\n\n` +
-            `Return shots that combine the scene style with the specific dialogue content and adhere to historical plausibility. Return as JSON with a "shots" array of objects { shot, duration, prompt }.`,
+            `Create ${shotsNeeded} SEPARATE cinematic shots for this scene. Each shot is an individual, standalone image that will become a 10-second video.\n\n` +
+            `CRITICAL IMAGE COMPOSITION RULES:\n` +
+            `- Each shot must be a SINGLE, unified cinematic frame\n` +
+            `- NO text, titles, captions, or written words visible in the image\n` +
+            `- NO split screens, panels, montages, or multiple views in one image\n` +
+            `- NO "showing multiple angles" or "various perspectives" in one shot\n` +
+            `- Each prompt describes ONE specific camera angle/composition only\n` +
+            `- Think like a film director: each shot is one camera position filming one moment\n` +
+            `- Focus on visual storytelling through composition, lighting, and atmosphere only\n\n` +
+            `- Era & Place Lock: All shots must be faithful to the historical context. Do NOT include modern elements.\n` +
+            `- Dialogue Alignment: Each shot supports specific dialogue beats (reference line numbers)\n` +
+            `- Visual Variety: Use different camera angles (wide, medium, close-up) across shots\n` +
+            `- Durations: Each shot duration must match the provided array exactly\n` +
+            `- 10-Second Focus: Create prompts for sustained visual interest over 10 seconds\n` +
+            `- Prompt Prefix: Begin each with [Setting: <name> | Era: <value>]\n\n` +
+            `EXAMPLE GOOD PROMPTS:\n` +
+            `"Wide establishing shot of Roman forum at dawn with marble columns"\n` +
+            `"Medium shot of speaker gesturing from lectern, marble architecture behind"\n` +
+            `"Close-up of listener's thoughtful expression, soft natural lighting"\n\n` +
+            `EXAMPLE BAD PROMPTS (AVOID):\n` +
+            `"Split screen showing both speaker and audience reaction"\n` +
+            `"Montage of forum from multiple angles"\n` +
+            `"Various shots of the crowd and speaker together"\n\n` +
+            `Return as JSON with "shots" array of objects { shot, duration, prompt }.`,
           input: `Scene Style: ${sceneDescription}\n\nContext:\n${contextPreamble}\n\nDialogue (numbered):\n${dialogueContext}`,
           text: {
             format: {
@@ -372,7 +393,7 @@ export class SpeechService {
         }
       );
 
-      // Just wait for the response - it takes ~20 seconds
+      // Wait for the response - it takes ~20 seconds
       await new Promise(resolve => setTimeout(resolve, 20000));
 
       // The response should be ready now - extract the shots
@@ -384,7 +405,7 @@ export class SpeechService {
           if (textContent && textContent.text) {
             const parsed = JSON.parse(textContent.text);
             if (parsed.shots && Array.isArray(parsed.shots) && parsed.shots.length >= shotsNeeded) {
-              logger.info(`Successfully generated ${parsed.shots.length} dialogue-aware shot prompts from OpenAI`);
+              logger.info(`Successfully generated ${parsed.shots.length} individual cinematic shot prompts`);
               return parsed.shots.slice(0, shotsNeeded);
             }
           }
@@ -394,34 +415,8 @@ export class SpeechService {
       throw new Error('Could not extract shot prompts from OpenAI response');
 
     } catch (error) {
-      logger.error(`Error generating dialogue-aware shot prompts: ${error}`);
-      
-      // Fallback: generate descriptive variations with smart durations (5 or 10 seconds only)
-      const fallbackPrompts: {shot: number, duration: number, prompt: string}[] = [];
-      const variations = [
-        { type: "wide establishing shot", duration: 10 },
-        { type: "medium shot with dramatic lighting", duration: 5 }, 
-        { type: "close-up detail shot", duration: 5 },
-        { type: "low angle perspective", duration: 10 },
-        { type: "high angle overview", duration: 10 },
-        { type: "side profile composition", duration: 5 },
-        { type: "shallow depth of field focus", duration: 5 },
-        { type: "atmospheric wide shot", duration: 10 },
-        { type: "tight framing on key elements", duration: 5 }
-      ];
-      
-      for (let i = 1; i <= shotsNeeded; i++) {
-        const variationIndex = (i - 1) % variations.length;
-        const variation = variations[variationIndex]!;
-        fallbackPrompts.push({
-          shot: i,
-          duration: variation.duration,
-          prompt: `${sceneDescription}, ${variation.type}`
-        });
-      }
-      
-      logger.info(`Using fallback prompts: ${fallbackPrompts.length} variations`);
-      return fallbackPrompts;
+      logger.error(`Error generating shot prompts: ${error}`);
+      throw error;
     }
   }
 
@@ -484,7 +479,7 @@ export class SpeechService {
     });
   }
 
-  private async checkAndTriggerMixing(storyId: string): Promise<void> {
+  private async checkAndTriggerMixing(storyId: string, audioOnly: boolean = false): Promise<void> {
     if (this.mixingChecks.has(storyId)) return;
 
     this.mixingChecks.add(storyId);
@@ -500,12 +495,13 @@ export class SpeechService {
       if (completedSegments.length === segments.length && segments.length > 0) {
         logger.info(`All scene audio completed for story ${storyId}. Ready for mixing.`);
 
+        const status = audioOnly ? "audio_ready" : "audio_ready";
         await prisma.story.update({
           where: { id: storyId },
-          data: { status: "audio_ready" },
+          data: { status },
         });
 
-        await this.mixAudioSegments(storyId, completedSegments as any[]);
+        await this.mixAudioSegments(storyId, completedSegments as any[], audioOnly);
       }
     } catch (error) {
       logger.error(`Error checking mixing status: ${error}`);
@@ -514,11 +510,11 @@ export class SpeechService {
     }
   }
 
-  private async mixAudioSegments(storyId: string, segments: any[]): Promise<void> {
+  private async mixAudioSegments(storyId: string, segments: any[], audioOnly: boolean = false): Promise<void> {
     const tempDir = path.join(process.cwd(), "temp", storyId);
 
     try {
-      logger.info(`Starting audio mixing for story: ${storyId}`);
+      logger.info(`Starting audio mixing for story: ${storyId} - ${audioOnly ? 'audio-only' : 'video'} mode`);
 
       fs.mkdirSync(tempDir, { recursive: true });
 
@@ -528,30 +524,36 @@ export class SpeechService {
         audioFiles.push(filePath);
       }
 
-      const finalAudioPath = path.join(tempDir, "final_audio.mp3");
-      await this.concatenateAudioFiles(audioFiles, finalAudioPath, tempDir);
+      const speechAudioPath = path.join(tempDir, "speech_audio.mp3");
+      await this.concatenateAudioFiles(audioFiles, speechAudioPath, tempDir);
 
-      const finalAudioBuffer = fs.readFileSync(finalAudioPath);
-      const finalAudioUrl = await this.uploadFinalAudio(finalAudioBuffer, storyId);
+      // For audio-only mode, mix with music and save to audio_url
+      if (audioOnly) {
+        await this.mixWithMusicAndFinalize(storyId, speechAudioPath, tempDir);
+      } else {
+        // For video mode, just save the speech audio (existing behavior)
+        const finalAudioBuffer = fs.readFileSync(speechAudioPath);
+        const finalAudioUrl = await this.uploadFinalAudio(finalAudioBuffer, storyId);
 
-      // Generate subtitles from the final audio
-      const subtitles = await this.generateSubtitles(finalAudioBuffer);
+        // Generate subtitles from the final audio
+        const subtitles = await this.generateSubtitles(finalAudioBuffer);
 
-      await prisma.story.update({
-        where: { id: storyId },
-        data: {
-          audio_url: finalAudioUrl,
-          subtitles: JSON.stringify(subtitles),
-          status: "audio_completed",
-        },
-      });
+        await prisma.story.update({
+          where: { id: storyId },
+          data: {
+            audio_url: finalAudioUrl,
+            subtitles: JSON.stringify(subtitles),
+            status: "audio_completed",
+          },
+        });
 
-      logger.info(`Audio mixing completed for story: ${storyId}, URL: ${finalAudioUrl}`);
+        logger.info(`Audio mixing completed for story: ${storyId}, URL: ${finalAudioUrl}`);
 
-      // Check if story is now complete (all components ready)
-      const { StoryCompletionService } = await import("../../events/StoryCompletionService.js");
-      const storyCompletionService = new StoryCompletionService();
-      await storyCompletionService.checkStoryCompletion(storyId);
+        // Check if story is now complete (all components ready)
+        const { StoryCompletionService } = await import("../../events/StoryCompletionService.js");
+        const storyCompletionService = new StoryCompletionService();
+        await storyCompletionService.checkStoryCompletion(storyId);
+      }
 
     } catch (error) {
       logger.error(`Error mixing audio segments: ${error}`);
@@ -564,6 +566,102 @@ export class SpeechService {
       throw error;
     } finally {
       await this.cleanupTempDirectory(tempDir);
+    }
+  }
+
+  // New method to mix speech with music for audio-only mode
+  private async mixWithMusicAndFinalize(storyId: string, speechAudioPath: string, tempDir: string): Promise<void> {
+    try {
+      // Get the music for this story
+      const { MusicService } = await import("./MusicService.js");
+      const musicService = new MusicService();
+      const music = await musicService.getMusicByStoryId(storyId);
+
+      if (!music || !music.audio_url) {
+        logger.warn(`No music found for story ${storyId}, using speech only`);
+        
+        // Just use speech audio as final audio
+        const finalAudioBuffer = fs.readFileSync(speechAudioPath);
+        const finalAudioUrl = await this.uploadFinalAudio(finalAudioBuffer, storyId);
+
+        // Generate subtitles from the final audio (optional for audio-only)
+        const subtitles = await this.generateSubtitles(finalAudioBuffer);
+
+        await prisma.story.update({
+          where: { id: storyId },
+          data: {
+            audio_url: finalAudioUrl,
+            subtitles: JSON.stringify(subtitles),
+            status: "completed", // Audio-only stories are complete at this point
+          },
+        });
+
+        logger.info(`Audio-only story completed without music: ${storyId}, URL: ${finalAudioUrl}`);
+        return;
+      }
+
+      // Download background music
+      const musicPath = path.join(tempDir, "background_music.mp3");
+      const musicResponse = await axios.get(music.audio_url, {
+        responseType: "arraybuffer",
+      });
+      fs.writeFileSync(musicPath, Buffer.from(musicResponse.data));
+
+      // Mix speech with background music using ffmpeg
+      const finalAudioPath = path.join(tempDir, "final_mixed_audio.mp3");
+      
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg()
+          .addInput(speechAudioPath)
+          .addInput(musicPath)
+          .addInputOption('-stream_loop -1') // Loop music
+          .complexFilter([
+            '[1:a]volume=0.3[music]', // Reduce music volume to 30%
+            '[0:a][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]'
+          ])
+          .outputOptions([
+            '-map [mixed]',
+            '-c:a libmp3lame',
+            '-b:a 192k'
+          ])
+          .on('start', (commandLine) => {
+            logger.info(`FFmpeg mixing started: ${commandLine}`);
+          })
+          .on('progress', (progress) => {
+            logger.info(`Mixing progress: ${Math.round(progress.percent || 0)}% done`);
+          })
+          .on('end', () => {
+            logger.info("Audio mixing with music completed successfully");
+            resolve();
+          })
+          .on('error', (err) => {
+            logger.error(`FFmpeg mixing error: ${err.message}`);
+            reject(err);
+          })
+          .save(finalAudioPath);
+      });
+
+      // Upload final mixed audio
+      const finalAudioBuffer = fs.readFileSync(finalAudioPath);
+      const finalAudioUrl = await this.uploadFinalAudio(finalAudioBuffer, storyId);
+
+      // Generate subtitles from the final audio (optional for audio-only)
+      const subtitles = await this.generateSubtitles(finalAudioBuffer);
+
+      await prisma.story.update({
+        where: { id: storyId },
+        data: {
+          audio_url: finalAudioUrl,
+          subtitles: JSON.stringify(subtitles),
+          status: "completed", // Audio-only stories are complete at this point
+        },
+      });
+
+      logger.info(`Audio-only story completed with music: ${storyId}, URL: ${finalAudioUrl}`);
+
+    } catch (error) {
+      logger.error(`Error mixing speech with music: ${error}`);
+      throw error;
     }
   }
 

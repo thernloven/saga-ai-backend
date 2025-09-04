@@ -80,105 +80,105 @@ export class ImageService {
   }
 
   // Generate anchor images for entities appearing 2+ times
-async generateAnchorImages(storyId: string, imageStyle: string): Promise<void> {
-  try {
-    // Get anchors that need image generation
-    const anchorsToGenerate = await prisma.anchor.findMany({
-      where: {
-        story_id: storyId,
-        appearances: { gte: 2 },
-        status: 'pending'
+  async generateAnchorImages(storyId: string, imageStyle: string): Promise<void> {
+    try {
+      // Get anchors that need image generation
+      const anchorsToGenerate = await prisma.anchor.findMany({
+        where: {
+          story_id: storyId,
+          appearances: { gte: 2 },
+          status: 'pending'
+        }
+      });
+
+      if (anchorsToGenerate.length === 0) {
+        logger.info(`No anchor images needed for story ${storyId}`);
+        return;
       }
-    });
 
-    if (anchorsToGenerate.length === 0) {
-      logger.info(`No anchor images needed for story ${storyId}`);
-      return;
+      logger.info(`Generating ${anchorsToGenerate.length} anchor images for story ${storyId}`);
+
+      // Generate image for each anchor
+      for (const anchor of anchorsToGenerate) {
+        await this.generateAnchorImage(storyId, anchor, imageStyle);
+      }
+
+    } catch (error) {
+      logger.error(`Error generating anchor images for story ${storyId}: ${error}`);
+      throw error;
     }
-
-    logger.info(`Generating ${anchorsToGenerate.length} anchor images for story ${storyId}`);
-
-    // Generate image for each anchor
-    for (const anchor of anchorsToGenerate) {
-      await this.generateAnchorImage(storyId, anchor, imageStyle);
-    }
-
-  } catch (error) {
-    logger.error(`Error generating anchor images for story ${storyId}: ${error}`);
-    throw error;
   }
-}
 
-private async generateAnchorImage(
-  storyId: string,
-  anchor: any,
-  imageStyle: string
-): Promise<void> {
-  try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error('OpenAI API key not configured');
-    }
+  private async generateAnchorImage(
+    storyId: string,
+    anchor: any,
+    imageStyle: string
+  ): Promise<void> {
+    try {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        throw new Error('OpenAI API key not configured');
+      }
 
-    // Build prompt from anchor name, description and style
-    const styledPrompt = `${anchor.name}: ${anchor.description}, ${imageStyle} style`;
+      // Build prompt from anchor name, description and style
+      const styledPrompt = `${anchor.name}: ${anchor.description}, ${imageStyle} style, no text or captions visible`;
 
-    logger.info(`Generating anchor image for: ${anchor.name} (${anchor.anchor_uuid})`);
+      logger.info(`Generating anchor image for: ${anchor.name} (${anchor.anchor_uuid})`);
 
-    // Call OpenAI image generation
-    const response = await axios.post(
-      'https://api.openai.com/v1/responses',
-      {
-        model: 'gpt-5-nano',
-        tools: [
-          {
-            type: 'image_generation',
-            size: '1536x1024', // 16:9
-          },
-        ],
-        input: styledPrompt,
-        background: true,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
+      // Call OpenAI image generation
+      const response = await axios.post(
+        'https://api.openai.com/v1/responses',
+        {
+          model: 'gpt-5-nano',
+          tools: [
+            {
+              type: 'image_generation',
+              size: '1536x1024', // 16:9
+            },
+          ],
+          input: styledPrompt,
+          background: true,
         },
-      }
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
 
-    const openaiResponse = response.data;
+      const openaiResponse = response.data;
 
-    // Update anchor record with response ID
-    await prisma.anchor.update({
-      where: { id: anchor.id },
-      data: {
-        openai_response_id: openaiResponse.id,
-        status: 'processing'
-      }
-    });
+      // Update anchor record with response ID
+      await prisma.anchor.update({
+        where: { id: anchor.id },
+        data: {
+          openai_response_id: openaiResponse.id,
+          status: 'processing'
+        }
+      });
 
-    // Track response for webhook completion
-    await prisma.response.create({
-      data: {
-        response_id: openaiResponse.id,
-        type: 'anchor'
-      }
-    });
+      // Track response for webhook completion
+      await prisma.response.create({
+        data: {
+          response_id: openaiResponse.id,
+          type: 'anchor'
+        }
+      });
 
-    logger.info(`Anchor image generation initiated for ${anchor.name}, response ID: ${openaiResponse.id}`);
-  } catch (error) {
-    logger.error(`Error generating anchor image for ${anchor.name}: ${error}`);
-    
-    // Mark anchor as failed
-    await prisma.anchor.update({
-      where: { id: anchor.id },
-      data: { status: 'failed' }
-    });
-    
-    throw error;
+      logger.info(`Anchor image generation initiated for ${anchor.name}, response ID: ${openaiResponse.id}`);
+    } catch (error) {
+      logger.error(`Error generating anchor image for ${anchor.name}: ${error}`);
+      
+      // Mark anchor as failed
+      await prisma.anchor.update({
+        where: { id: anchor.id },
+        data: { status: 'failed' }
+      });
+      
+      throw error;
+    }
   }
-}
 
   // Updated method: Generate images using dynamic shot prompts with durations
   async generateImagesForScene(
@@ -232,13 +232,13 @@ private async generateAnchorImage(
         throw new Error('OpenAI API key not configured');
       }
 
-      // Build styled prompt using the specific shot prompt (not scene's image_prompt)
-      const basePrompt = opts?.settingHint
-        ? `${shotPrompt}. Environment: ${opts.settingHint}`
-        : shotPrompt;
-      const styledPrompt = `${basePrompt} in ${imageStyle} style`;
+      // Use the shot prompt as-is since it's already styled by OpenAI
+      // Only add setting hint and explicit no-text instruction
+      const finalPrompt = opts?.settingHint
+        ? `${shotPrompt}. Environment: ${opts.settingHint}. No text, captions, or written words visible in the image.`
+        : `${shotPrompt}. No text, captions, or written words visible in the image.`;
 
-      logger.info(`Generating shot ${shotNumber} for scene ${sceneId} (${shotDuration}s duration)`);
+      logger.info(`Generating shot ${shotNumber} for scene ${sceneId} (${shotDuration}s): using OpenAI-styled prompt`);
 
       // Prepare payload for OpenAI API
       const payload: any = {
@@ -249,7 +249,7 @@ private async generateAnchorImage(
             size: '1536x1024', // 16:9
           },
         ],
-        input: styledPrompt,
+        input: finalPrompt, // Don't add imageStyle again - it's already in the shot prompt
         background: true,
       };
 
@@ -257,7 +257,7 @@ private async generateAnchorImage(
       if (opts?.previousResponseIds && opts.previousResponseIds.length > 0) {
         // Use the first previous response ID as anchor
         payload.previous_response_id = opts.previousResponseIds[0];
-        payload.instructions = "Using the previous image generated as an anchor reference.";
+        payload.instructions = "Using the previous image generated as an anchor reference for character and setting consistency.";
       }
 
       const response = await axios.post(
@@ -280,7 +280,7 @@ private async generateAnchorImage(
           scene_id: sceneId,
           shot_number: shotNumber,
           duration: shotDuration,
-          image_prompt: styledPrompt,
+          image_prompt: finalPrompt,
           openai_response_id: openaiResponse.id,
           status: 'processing',
         },
